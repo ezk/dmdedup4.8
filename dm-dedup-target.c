@@ -55,7 +55,7 @@ struct fec_io {
 };
 
 /*
- * fec_work struct is used to intialize a dedicated
+ * fec_work struct is used to initialize a dedicated
  * workqueue only for doing Forward error correction
  */
 struct fec_work {
@@ -116,7 +116,7 @@ static void fec_endio(struct bio *bio, struct fec_io *io)
 {
 	int r;
 	struct dedup_config *dc;
-        u8 hash[MAX_DIGEST_SIZE]= {0};
+        u8 hash[MAX_DIGEST_SIZE];
 	struct hash_pbn_value hashpbn_value;
 	struct lbn_pbn_value lbnpbn_value;
 	uint32_t vsize;
@@ -130,7 +130,7 @@ static void fec_endio(struct bio *bio, struct fec_io *io)
 
 	/* calculate hash for the data read from the disk */
 	r = compute_hash_bio(dc->desc_table, bio, hash);
-	print_hash(hash, io->lbn);
+
 	if (r)
 		goto out;
 
@@ -144,7 +144,7 @@ static void fec_endio(struct bio *bio, struct fec_io *io)
 
 	/* HASH->PBN lookup return a valid entry */
 	if (r > 0) {
-		/* Lookup succesfull, Comparing io->pbn with hashpbn_value.pbn */
+		/* Lookup succesfull, Comparing LBN-PBN with HASH-PBN */
 		if (io->pbn == hashpbn_value.pbn)
 			goto out;
 
@@ -178,7 +178,7 @@ static void fec_endio(struct bio *bio, struct fec_io *io)
 	}
 
 	/*
-         * No matching entry found in HASH->PBN lookup
+	 * No matching entry found in HASH->PBN lookup
 	 * Insert a new HASH->PBN mapping
 	 * XXX: Leaves an extra entry in HASH->PBN for the
 		old data.
@@ -200,21 +200,20 @@ out_fec_fail:
 out:
 	kfree(io);
 	bio_endio(bio);
-
 }
 
-static void fec_work(struct work_struct *ws) {
-
+static void fec_work(struct work_struct *ws)
+{
 	struct fec_work *data = container_of(ws, struct fec_work, worker);
 	struct fec_io *io = (struct fec_io *)data->io;
 
 	mempool_free(data, io->dc->fec_work_pool);
 
 	fec_endio(io->base_bio, io);
-
 }
 
-static void dedup_fec_endio(struct bio* clone) {
+static void dedup_fec_endio(struct bio *clone)
+{
 	struct fec_work *data;
 	struct fec_io *io;
 
@@ -227,13 +226,12 @@ static void dedup_fec_endio(struct bio* clone) {
 	 * initialize a worker for handling the FEC.
 	 * Directly calling fec_work would panic
 	 */
-
 	data = mempool_alloc(io->dc->fec_work_pool, GFP_NOIO);
 	if (!data) {
 		/*
 		 * XXX: Decide whether to fail or silently pass
-			if unable to do Forward Error Correction
-			and set the corresponding error flags
+		 *	if unable to do Forward Error Correction
+		 *	and set the corresponding error flags
 		 */
 		bio_endio(io->base_bio);
 		kfree(io);	
@@ -245,7 +243,6 @@ static void dedup_fec_endio(struct bio* clone) {
 	INIT_WORK(&(data->worker), fec_work);
 
 	queue_work(io->dc->workqueue, &(data->worker));
-
 }
 
 static int handle_read(struct dedup_config *dc, struct bio *bio)
@@ -267,7 +264,7 @@ static int handle_read(struct dedup_config *dc, struct bio *bio)
 		bio_zero_endio(bio);
 	} else if (r == 1) { /* entry found in the LBN->PBN store */
 		/* if fec not enabled directly do io request */
-		if(!dc->fec) {
+		if (!dc->fec) {
 			clone = bio;
 			goto read_no_fec;
 		}
@@ -285,7 +282,7 @@ static int handle_read(struct dedup_config *dc, struct bio *bio)
 		 * 	corruption checks are done
 		 */
 		clone = bio_clone_fast(bio, GFP_NOIO, dc->bs);
-		if(!clone) {
+		if (!clone) {
 			r = -ENOMEM;
 			goto out_clone_fail;
 		}
@@ -295,9 +292,6 @@ static int handle_read(struct dedup_config *dc, struct bio *bio)
 		clone->bi_end_io = dedup_fec_endio;
 		clone->bi_private = io;
 
-		/* store the fec_io structure in bio's private field
-		 *	used as indirect argument when disk read is finished
-		 */
 read_no_fec:
 		do_io(dc, clone, lbnpbn_value.pbn);
 	} else {
@@ -862,7 +856,7 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	}
 
 	dc->bs = bioset_create(MIN_IOS, 0);
-	if(!dc->bs) {
+	if (!dc->bs) {
 		ti->error = "failed to create bioset";
 		r = -ENOMEM;
 		goto bad_bs;
