@@ -23,6 +23,8 @@
 
 #define MAX_DEV_NAME_LEN (64)
 
+#define MIN_IOS 64
+
 #define MIN_DATA_DEV_BLOCK_SIZE (4 * 1024)
 #define MAX_DATA_DEV_BLOCK_SIZE (1024 * 1024)
 
@@ -39,6 +41,26 @@ struct dedup_work {
 	struct work_struct worker;
 	struct dedup_config *config;
 	struct bio *bio;
+};
+
+/*
+ * fec_io struct is used to pass arguments through 
+ * struct bio, to be used later in the callback function
+ */
+struct fec_io {
+	struct dedup_config *dc;
+	uint64_t pbn;
+	uint64_t lbn;	
+	struct bio *base_bio;
+};
+
+/*
+ * fec_work struct is used to intialize a dedicated
+ * workqueue only for doing Forward error correction
+ */
+struct fec_work {
+	struct work_struct worker;
+	struct fec_io *io;
 };
 
 enum backend {
@@ -78,25 +100,218 @@ static void do_io(struct dedup_config *dc, struct bio *bio, uint64_t pbn)
 	do_io_remap_device(dc, bio);
 }
 
+/*
+ * bio - contains the data read from the disk
+ * io  - contains pbn, lbn information obtained from LBN->PBN mapping
+ *
+ * Hash is calculated for the data inside bio, and
+ * checked against HASH->PBN structure. If PBN from both the
+ * mappings doesn't match, then the function tries to correct
+ * the error
+ *
+ * The refcount for old pbn is reduced so that it gets taken care
+ * by the garbage collection engine when it reaches 1
+ */
+static void fec_endio(struct bio *bio, struct fec_io *io)
+{
+	int r;
+	struct dedup_config *dc;
+        u8 hash[MAX_DIGEST_SIZE]= {0};
+	struct hash_pbn_value hashpbn_value;
+	struct lbn_pbn_value lbnpbn_value;
+	uint32_t vsize;
+
+	if (bio->bi_error < 0)
+		goto out;
+
+	dc = io->dc;
+
+	BUG_ON(!dc->fec);
+
+	/* calculate hash for the data read from the disk */
+	r = compute_hash_bio(dc->desc_table, bio, hash);
+	print_hash(hash, io->lbn);
+	if (r)
+		goto out;
+
+	/* retrieve the pbn from HASH->PBN mapping if any */
+	r = dc->kvs_hash_pbn->kvs_lookup(dc->kvs_hash_pbn, hash,
+			dc->crypto_key_size, &hashpbn_value, &vsize);
+
+	/* HASH->PBN lookup failed */
+	if (r < 0)
+		goto out;
+
+	/* HASH->PBN lookup return a valid entry */
+	if (r > 0) {
+		/* Lookup succesfull, Comparing io->pbn with hashpbn_value.pbn */
+		if (io->pbn == hashpbn_value.pbn)
+			goto out;
+
+		/* if pbns doens't match, remove the old LBN->PBN entry */
+		r = dc->kvs_lbn_pbn->kvs_delete(dc->kvs_lbn_pbn,
+						(void *)&(io->lbn), sizeof(io->lbn));
+		if (r < 0)
+			goto out_fec_fail;
+
+		/* decrement the refcount for old PBN */
+		dc->mdops->dec_refcount(dc->bmd, io->pbn);
+
+		lbnpbn_value.pbn = hashpbn_value.pbn;
+
+		/* increment the refcount for new PBN */
+		r = dc->mdops->inc_refcount(dc->bmd, lbnpbn_value.pbn);
+		if (r < 0)
+			goto out_fec_fail;
+
+		/* insert the new mapping in LBN->PBN mapping */
+		r = dc->kvs_lbn_pbn->kvs_insert(dc->kvs_lbn_pbn,
+						(void *)&(io->lbn), sizeof(io->lbn),
+						(void *)&lbnpbn_value,
+						sizeof(lbnpbn_value));
+		if (r < 0) {
+			dc->mdops->dec_refcount(dc->bmd, lbnpbn_value.pbn);
+			goto out_fec_fail;
+		}
+
+		goto out_fec_pass;
+	}
+
+	/*
+         * No matching entry found in HASH->PBN lookup
+	 * Insert a new HASH->PBN mapping
+	 * XXX: Leaves an extra entry in HASH->PBN for the
+		old data.
+	 */
+	hashpbn_value.pbn = io->pbn;
+	r = dc->kvs_hash_pbn->kvs_insert(dc->kvs_hash_pbn,
+				(void *)hash, dc->crypto_key_size,
+				(void *)&hashpbn_value, sizeof(hashpbn_value));
+	if (r < 0)
+		goto out_fec_fail;
+
+out_fec_pass:
+	dc->fec_fixed++;
+
+out_fec_fail:
+	dc->corrupted_blocks++;
+	DMINFO("Corrupted block: %lld", io->pbn);	
+	
+out:
+	kfree(io);
+	bio_endio(bio);
+
+}
+
+static void fec_work(struct work_struct *ws) {
+
+	struct fec_work *data = container_of(ws, struct fec_work, worker);
+	struct fec_io *io = (struct fec_io *)data->io;
+
+	mempool_free(data, io->dc->fec_work_pool);
+
+	fec_endio(io->base_bio, io);
+
+}
+
+static void dedup_fec_endio(struct bio* clone) {
+	struct fec_work *data;
+	struct fec_io *io;
+
+        io = clone->bi_private;
+
+	/* deallocate clone created before disk read */
+	bio_put(clone);
+
+	/*
+	 * initialize a worker for handling the FEC.
+	 * Directly calling fec_work would panic
+	 */
+
+	data = mempool_alloc(io->dc->fec_work_pool, GFP_NOIO);
+	if (!data) {
+		/*
+		 * XXX: Decide whether to fail or silently pass
+			if unable to do Forward Error Correction
+			and set the corresponding error flags
+		 */
+		bio_endio(io->base_bio);
+		kfree(io);	
+		return;
+	}
+
+	data->io = io;
+
+	INIT_WORK(&(data->worker), fec_work);
+
+	queue_work(io->dc->workqueue, &(data->worker));
+
+}
+
 static int handle_read(struct dedup_config *dc, struct bio *bio)
 {
 	uint64_t lbn;
 	uint32_t vsize;
 	struct lbn_pbn_value lbnpbn_value;
+	struct fec_io *io;
+	struct bio *clone;
 	int r;
 
 	lbn = bio_lbn(dc, bio);
 
+	/* get the pbn in LBN->PBN store for incoming lbn */
 	r = dc->kvs_lbn_pbn->kvs_lookup(dc->kvs_lbn_pbn, (void *)&lbn,
 			sizeof(lbn), (void *)&lbnpbn_value, &vsize);
-	if (r == 0)
-		bio_zero_endio(bio);
-	else if (r == 1)
-		do_io(dc, bio, lbnpbn_value.pbn);
-	else
-		return r;
 
-	return 0;
+	if (r == 0) { /* unable to find the entry in LBN->PBN store */
+		bio_zero_endio(bio);
+	} else if (r == 1) { /* entry found in the LBN->PBN store */
+		/* if fec not enabled directly do io request */
+		if(!dc->fec) {
+			clone = bio;
+			goto read_no_fec;
+		}
+
+		/* prepare fec_io structure to be later used for FEC */
+		io = kmalloc(sizeof(struct fec_io), GFP_NOIO);
+		io->dc = dc;
+		io->pbn = lbnpbn_value.pbn;
+		io->lbn = lbn;
+		io->base_bio = bio;
+
+		/* prepare bio clone to handle disk read
+		 *	clone is created so that we can have our own endio
+		 * 	where we call bio_endio on original bio after
+		 * 	corruption checks are done
+		 */
+		clone = bio_clone_fast(bio, GFP_NOIO, dc->bs);
+		if(!clone) {
+			r = -ENOMEM;
+			goto out_clone_fail;
+		}
+		/* store the fec_io structure in bio's private field
+		 *	used as indirect argument when disk read is finished
+		 */
+		clone->bi_end_io = dedup_fec_endio;
+		clone->bi_private = io;
+
+		/* store the fec_io structure in bio's private field
+		 *	used as indirect argument when disk read is finished
+		 */
+read_no_fec:
+		do_io(dc, clone, lbnpbn_value.pbn);
+	} else {
+		goto out;
+	}
+
+	r = 0;
+	goto out;
+
+out_clone_fail:
+	kfree(io);
+
+out:
+	return r;
 }
 
 static int allocate_block(struct dedup_config *dc, uint64_t *pbn_new)
@@ -628,6 +843,7 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	uint64_t physical_block_counter = 0;
 
 	mempool_t *dedup_work_pool = NULL;
+	mempool_t *fec_work_pool = NULL;
 
 	bool unformatted;
 
@@ -645,6 +861,13 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		goto out;
 	}
 
+	dc->bs = bioset_create(MIN_IOS, 0);
+	if(!dc->bs) {
+		ti->error = "failed to create bioset";
+		r = -ENOMEM;
+		goto bad_bs;
+	}
+
 	wq = create_singlethread_workqueue("dm-dedup");
 	if (!wq) {
 		ti->error = "failed to create workqueue";
@@ -655,10 +878,19 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	dedup_work_pool = mempool_create_kmalloc_pool(MIN_DEDUP_WORK_IO,
 						sizeof(struct dedup_work));
 	if (!dedup_work_pool) {
-		ti->error = "failed to create mempool";
+		ti->error = "failed to create dedup mempool";
 		r = -ENOMEM;
-		goto bad_mempool;
+		goto bad_dedup_mempool;
 	}
+
+	fec_work_pool = mempool_create_kmalloc_pool(MIN_DEDUP_WORK_IO,
+						sizeof(struct fec_work));
+	if (!fec_work_pool) {
+		ti->error = "failed to create fec mempool";
+		r = -ENOMEM;
+		goto bad_fec_mempool;
+	}
+
 
 	dc->io_client = dm_io_client_create();
 	if (IS_ERR(dc->io_client)) {
@@ -749,6 +981,7 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	dc->workqueue = wq;
 	dc->dedup_work_pool = dedup_work_pool;
+	dc->fec_work_pool = fec_work_pool;
 	dc->bmd = md;
 
 	dc->logical_block_counter = logical_block_counter;
@@ -761,6 +994,10 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	dc->reads_on_writes = 0;
 	dc->overwrites = 0;
 	dc->newwrites = 0;
+
+	dc->fec = false;
+	dc->fec_fixed = 0;
+	dc->corrupted_blocks = 0;
 
 	strcpy(dc->crypto_alg, da.hash_algo);
 	dc->crypto_key_size = crypto_key_size;
@@ -779,7 +1016,6 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	ti->flush_supported = true;
 
 	ti->private = dc;
-
 	return 0;
 
 bad_kvstore_init:
@@ -789,10 +1025,14 @@ bad_metadata_init:
 		dc->mdops->exit_meta(md);
 	dm_io_client_destroy(dc->io_client);
 bad_io_client:
+	mempool_destroy(fec_work_pool);
+bad_fec_mempool:
 	mempool_destroy(dedup_work_pool);
-bad_mempool:
+bad_dedup_mempool:
 	destroy_workqueue(wq);
 bad_wq:
+	kfree(dc->bs);
+bad_bs:
 	kfree(dc);
 out:
 	destroy_dedup_args(&da);
@@ -941,6 +1181,10 @@ static int dm_dedup_message(struct dm_target *ti,
 			dc->mdops->flush_bufio_cache(dc->bmd);
 		else
 			r = -ENOTSUPP;
+	} else if (!strcasecmp(argv[0], "enable_fec")) {
+		dc->fec = true;
+	} else if (!strcasecmp(argv[0], "disable_fec")) {
+		dc->fec = false;
 	} else
 		r = -EINVAL;
 
