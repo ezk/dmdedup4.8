@@ -74,7 +74,8 @@ struct dedup_config {
 	uint64_t	overwrites;	/* writes to a prev. written offset */
 	uint64_t	newwrites;	/* writes to never written offsets */
 
-	bool		fec;	/* flag to check for block corruption */
+	bool		check_corruption; /* flag to check for data corruption */
+	bool		fec;	/* flag to fix block corruption */
 	uint64_t	fec_fixed;	  /* number of corruptions fixed */ 
 	uint64_t	corrupted_blocks; /* total number of corruptions
 					     encountered */

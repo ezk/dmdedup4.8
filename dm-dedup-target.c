@@ -126,7 +126,7 @@ static void fec_endio(struct bio *bio, struct fec_io *io)
 
 	dc = io->dc;
 
-	BUG_ON(!dc->fec);
+	BUG_ON(!dc->check_corruption);
 
 	/* calculate hash for the data read from the disk */
 	r = compute_hash_bio(dc->desc_table, bio, hash);
@@ -147,6 +147,9 @@ static void fec_endio(struct bio *bio, struct fec_io *io)
 		/* Lookup succesfull, Comparing LBN-PBN with HASH-PBN */
 		if (io->pbn == hashpbn_value.pbn)
 			goto out;
+
+		if (!dc->fec)
+			goto no_fec;
 
 		/* if pbns doens't match, remove the old LBN->PBN entry */
 		r = dc->kvs_lbn_pbn->kvs_delete(dc->kvs_lbn_pbn,
@@ -177,6 +180,9 @@ static void fec_endio(struct bio *bio, struct fec_io *io)
 		goto out_fec_pass;
 	}
 
+	if(!dc->fec)
+		goto no_fec;
+
 	/*
 	 * No matching entry found in HASH->PBN lookup
 	 * Insert a new HASH->PBN mapping
@@ -192,10 +198,15 @@ static void fec_endio(struct bio *bio, struct fec_io *io)
 
 out_fec_pass:
 	dc->fec_fixed++;
+	goto out_corruption;
 
+no_fec:
 out_fec_fail:
+	bio->bi_error = -EIO;
+
+out_corruption:
 	dc->corrupted_blocks++;
-	DMINFO("Corrupted block: %lld", io->pbn);	
+	DMINFO("Corrupted block: %lld", io->lbn);	
 	
 out:
 	kfree(io);
@@ -263,8 +274,8 @@ static int handle_read(struct dedup_config *dc, struct bio *bio)
 	if (r == 0) { /* unable to find the entry in LBN->PBN store */
 		bio_zero_endio(bio);
 	} else if (r == 1) { /* entry found in the LBN->PBN store */
-		/* if fec not enabled directly do io request */
-		if (!dc->fec) {
+		/* if corruption check not enabled directly do io request */
+		if (!dc->check_corruption) {
 			clone = bio;
 			goto read_no_fec;
 		}
@@ -541,6 +552,10 @@ static int handle_write(struct dedup_config *dc, struct bio *bio)
 	uint32_t vsize;
 	struct bio *new_bio = NULL;
 	int r;
+
+	/* If there is a data corruption make the device read-only */
+	if (dc->corrupted_blocks > dc->fec_fixed)
+		return -EIO;
 
 	dc->writes++;
 
@@ -1179,7 +1194,11 @@ static int dm_dedup_message(struct dm_target *ti,
 		dc->fec = true;
 	} else if (!strcasecmp(argv[0], "disable_fec")) {
 		dc->fec = false;
-	} else
+	} else if (!strcasecmp(argv[0], "enable_corruption_check")) {
+                dc->check_corruption = true;
+        } else if (!strcasecmp(argv[0], "disable_corruption_check")) {
+                dc->check_corruption = false;
+        }else
 		r = -EINVAL;
 
 	return r;
