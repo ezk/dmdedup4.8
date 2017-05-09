@@ -20,6 +20,7 @@
 #include "dm-dedup-ram.h"
 #include "dm-dedup-cbt.h"
 #include "dm-dedup-kvstore.h"
+#include "dm-dedup-check.h"
 
 #define MAX_DEV_NAME_LEN (64)
 
@@ -41,26 +42,6 @@ struct dedup_work {
 	struct work_struct worker;
 	struct dedup_config *config;
 	struct bio *bio;
-};
-
-/*
- * fec_io struct is used to pass arguments through 
- * struct bio, to be used later in the callback function
- */
-struct fec_io {
-	struct dedup_config *dc;
-	uint64_t pbn;
-	uint64_t lbn;	
-	struct bio *base_bio;
-};
-
-/*
- * fec_work struct is used to initialize a dedicated
- * workqueue only for doing Forward error correction
- */
-struct fec_work {
-	struct work_struct worker;
-	struct fec_io *io;
 };
 
 enum backend {
@@ -100,168 +81,12 @@ static void do_io(struct dedup_config *dc, struct bio *bio, uint64_t pbn)
 	do_io_remap_device(dc, bio);
 }
 
-/*
- * bio - contains the data read from the disk
- * io  - contains pbn, lbn information obtained from LBN->PBN mapping
- *
- * Hash is calculated for the data inside bio, and
- * checked against HASH->PBN structure. If PBN from both the
- * mappings doesn't match, then the function tries to correct
- * the error
- *
- * The refcount for old pbn is reduced so that it gets taken care
- * by the garbage collection engine when it reaches 1
- */
-static void fec_endio(struct bio *bio, struct fec_io *io)
-{
-	int r;
-	struct dedup_config *dc;
-        u8 hash[MAX_DIGEST_SIZE];
-	struct hash_pbn_value hashpbn_value;
-	struct lbn_pbn_value lbnpbn_value;
-	uint32_t vsize;
-
-	if (bio->bi_error < 0)
-		goto out;
-
-	dc = io->dc;
-
-	BUG_ON(!dc->check_corruption);
-
-	/* calculate hash for the data read from the disk */
-	r = compute_hash_bio(dc->desc_table, bio, hash);
-
-	if (r)
-		goto out;
-
-	/* retrieve the pbn from HASH->PBN mapping if any */
-	r = dc->kvs_hash_pbn->kvs_lookup(dc->kvs_hash_pbn, hash,
-			dc->crypto_key_size, &hashpbn_value, &vsize);
-
-	/* HASH->PBN lookup failed */
-	if (r < 0)
-		goto out;
-
-	/* HASH->PBN lookup return a valid entry */
-	if (r > 0) {
-		/* Lookup succesfull, Comparing LBN-PBN with HASH-PBN */
-		if (io->pbn == hashpbn_value.pbn)
-			goto out;
-
-		if (!dc->fec)
-			goto no_fec;
-
-		/* if pbns doens't match, remove the old LBN->PBN entry */
-		r = dc->kvs_lbn_pbn->kvs_delete(dc->kvs_lbn_pbn,
-						(void *)&(io->lbn), sizeof(io->lbn));
-		if (r < 0)
-			goto out_fec_fail;
-
-		/* decrement the refcount for old PBN */
-		dc->mdops->dec_refcount(dc->bmd, io->pbn);
-
-		lbnpbn_value.pbn = hashpbn_value.pbn;
-
-		/* increment the refcount for new PBN */
-		r = dc->mdops->inc_refcount(dc->bmd, lbnpbn_value.pbn);
-		if (r < 0)
-			goto out_fec_fail;
-
-		/* insert the new mapping in LBN->PBN mapping */
-		r = dc->kvs_lbn_pbn->kvs_insert(dc->kvs_lbn_pbn,
-						(void *)&(io->lbn), sizeof(io->lbn),
-						(void *)&lbnpbn_value,
-						sizeof(lbnpbn_value));
-		if (r < 0) {
-			dc->mdops->dec_refcount(dc->bmd, lbnpbn_value.pbn);
-			goto out_fec_fail;
-		}
-
-		goto out_fec_pass;
-	}
-
-	if(!dc->fec)
-		goto no_fec;
-
-	/*
-	 * No matching entry found in HASH->PBN lookup
-	 * Insert a new HASH->PBN mapping
-	 * XXX: Leaves an extra entry in HASH->PBN for the
-		old data.
-	 */
-	hashpbn_value.pbn = io->pbn;
-	r = dc->kvs_hash_pbn->kvs_insert(dc->kvs_hash_pbn,
-				(void *)hash, dc->crypto_key_size,
-				(void *)&hashpbn_value, sizeof(hashpbn_value));
-	if (r < 0)
-		goto out_fec_fail;
-
-out_fec_pass:
-	dc->fec_fixed++;
-	goto out_corruption;
-
-no_fec:
-out_fec_fail:
-	bio->bi_error = -EIO;
-
-out_corruption:
-	dc->corrupted_blocks++;
-	DMINFO("Corrupted block: %lld", io->lbn);	
-	
-out:
-	kfree(io);
-	bio_endio(bio);
-}
-
-static void fec_work(struct work_struct *ws)
-{
-	struct fec_work *data = container_of(ws, struct fec_work, worker);
-	struct fec_io *io = (struct fec_io *)data->io;
-
-	mempool_free(data, io->dc->fec_work_pool);
-
-	fec_endio(io->base_bio, io);
-}
-
-static void dedup_fec_endio(struct bio *clone)
-{
-	struct fec_work *data;
-	struct fec_io *io;
-
-        io = clone->bi_private;
-
-	/* deallocate clone created before disk read */
-	bio_put(clone);
-
-	/*
-	 * initialize a worker for handling the FEC.
-	 * Directly calling fec_work would panic
-	 */
-	data = mempool_alloc(io->dc->fec_work_pool, GFP_NOIO);
-	if (!data) {
-		/*
-		 * XXX: Decide whether to fail or silently pass
-		 *	if unable to do Forward Error Correction
-		 *	and set the corresponding error flags
-		 */
-		bio_endio(io->base_bio);
-		kfree(io);	
-		return;
-	}
-
-	data->io = io;
-
-	INIT_WORK(&(data->worker), fec_work);
-
-	queue_work(io->dc->workqueue, &(data->worker));
-}
-
 static int handle_read(struct dedup_config *dc, struct bio *bio)
 {
 	uint64_t lbn;
 	uint32_t vsize;
 	struct lbn_pbn_value lbnpbn_value;
-	struct fec_io *io;
+	struct check_io *io;
 	struct bio *clone;
 	int r;
 
@@ -280,8 +105,8 @@ static int handle_read(struct dedup_config *dc, struct bio *bio)
 			goto read_no_fec;
 		}
 
-		/* prepare fec_io structure to be later used for FEC */
-		io = kmalloc(sizeof(struct fec_io), GFP_NOIO);
+		/* prepare check_io structure to be later used for FEC */
+		io = kmalloc(sizeof(struct check_io), GFP_NOIO);
 		io->dc = dc;
 		io->pbn = lbnpbn_value.pbn;
 		io->lbn = lbn;
@@ -297,10 +122,10 @@ static int handle_read(struct dedup_config *dc, struct bio *bio)
 			r = -ENOMEM;
 			goto out_clone_fail;
 		}
-		/* store the fec_io structure in bio's private field
+		/* store the check_io structure in bio's private field
 		 *	used as indirect argument when disk read is finished
 		 */
-		clone->bi_end_io = dedup_fec_endio;
+		clone->bi_end_io = dedup_check_endio;
 		clone->bi_private = io;
 
 read_no_fec:
@@ -852,7 +677,7 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 	uint64_t physical_block_counter = 0;
 
 	mempool_t *dedup_work_pool = NULL;
-	mempool_t *fec_work_pool = NULL;
+	mempool_t *check_work_pool = NULL;
 
 	bool unformatted;
 
@@ -892,12 +717,12 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		goto bad_dedup_mempool;
 	}
 
-	fec_work_pool = mempool_create_kmalloc_pool(MIN_DEDUP_WORK_IO,
-						sizeof(struct fec_work));
-	if (!fec_work_pool) {
+	check_work_pool = mempool_create_kmalloc_pool(MIN_DEDUP_WORK_IO,
+						sizeof(struct check_work));
+	if (!check_work_pool) {
 		ti->error = "failed to create fec mempool";
 		r = -ENOMEM;
-		goto bad_fec_mempool;
+		goto bad_check_mempool;
 	}
 
 
@@ -990,7 +815,7 @@ static int dm_dedup_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 
 	dc->workqueue = wq;
 	dc->dedup_work_pool = dedup_work_pool;
-	dc->fec_work_pool = fec_work_pool;
+	dc->check_work_pool = check_work_pool;
 	dc->bmd = md;
 
 	dc->logical_block_counter = logical_block_counter;
@@ -1034,8 +859,8 @@ bad_metadata_init:
 		dc->mdops->exit_meta(md);
 	dm_io_client_destroy(dc->io_client);
 bad_io_client:
-	mempool_destroy(fec_work_pool);
-bad_fec_mempool:
+	mempool_destroy(check_work_pool);
+bad_check_mempool:
 	mempool_destroy(dedup_work_pool);
 bad_dedup_mempool:
 	destroy_workqueue(wq);
@@ -1190,14 +1015,21 @@ static int dm_dedup_message(struct dm_target *ti,
 			dc->mdops->flush_bufio_cache(dc->bmd);
 		else
 			r = -ENOTSUPP;
-	} else if (!strcasecmp(argv[0], "enable_fec")) {
-		dc->fec = true;
-	} else if (!strcasecmp(argv[0], "disable_fec")) {
-		dc->fec = false;
-	} else if (!strcasecmp(argv[0], "enable_corruption_check")) {
-                dc->check_corruption = true;
-        } else if (!strcasecmp(argv[0], "disable_corruption_check")) {
-                dc->check_corruption = false;
+	} else if (!strcasecmp(argv[0], "corruption_check")) {
+		if (argc % 2 == 1) {
+			DMERR("Incomplete message: Usage corruption_check <1/0> fec <1/0>");
+			r = -EINVAL;
+		} else if (!strcasecmp(argv[1], "1")) {
+			dc->check_corruption = true;
+			if (argc == 4 && !strcasecmp(argv[2], "fec") && !strcasecmp(argv[3], "1")) {
+				dc->fec = true;
+			}
+		} else if (!strcasecmp(argv[1], "0")) {
+			dc->fec = false;
+                	dc->check_corruption = false;
+		} else {
+			r = -EINVAL;
+		}
         }else
 		r = -EINVAL;
 

@@ -96,7 +96,7 @@ struct dedup_config {
 	uint64_t writes_after_flush;	/* # of writes after the last flush */
 
 	mempool_t *dedup_work_pool;	/* Dedup work pool */
-	mempool_t *fec_work_pool;	/* FEC work pool */
+	mempool_t *check_work_pool;	/* Corruption check work pool */
 };
 
 /* Value of the HASH-PBN key-value store */

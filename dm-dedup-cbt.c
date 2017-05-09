@@ -70,6 +70,10 @@ struct walk_info {
 };
 
 
+enum superblock_flags {
+	DDUP_destruction,
+};
+
 #define SPACE_MAP_ROOT_SIZE 128
 
 struct metadata_superblock {
@@ -116,7 +120,7 @@ static int __begin_transaction(struct metadata *md)
 	return r;
 }
 
-static int __commit_transaction(struct metadata *md)
+static int __commit_transaction(struct metadata *md, bool destroy_flag)
 {
 	int r = 0;
 	size_t metadata_len, data_len;
@@ -147,6 +151,11 @@ static int __commit_transaction(struct metadata *md)
 		goto out;
 
 	disk_super = dm_block_data(sblock);
+
+	if (destroy_flag)
+		disk_super->flags |= (1 << DDUP_destruction);  
+	else
+		disk_super->flags &= ~(1 << DDUP_destruction);
 
 	if (md->kvs_linear)
 		disk_super->lbn_pbn_root = cpu_to_le64(md->kvs_linear->root);
@@ -228,6 +237,8 @@ static int write_initial_superblock(struct metadata *md)
 
 	disk_super->blocknr = cpu_to_le64(dm_block_location(sblock));
 
+	disk_super->flags &= ~(1 << DDUP_destruction);
+ 
 	return dm_tm_commit(md->tm, sblock);
 
 bad_locked:
@@ -276,6 +287,9 @@ static int verify_superblock(struct dm_block_manager *bm)
 		return r;
 
 	disk_super = dm_block_data(sblock);
+
+	if (!(disk_super->flags & (1 << DDUP_destruction)))
+		goto bad_sb;
 
 	if (DM_DEDUP_MAGIC != le64_to_cpu(disk_super->magic))
 		goto bad_sb;
@@ -431,7 +445,8 @@ static void exit_meta_cowbtree(struct metadata *md)
 {
 	int ret;
 
-	ret = __commit_transaction(md);
+	bool destroy_flag = true;
+	ret = __commit_transaction(md, destroy_flag);
 	if (ret < 0)
 		DMWARN("%s: __commit_transaction() failed, error = %d.",
 			__func__, ret);
@@ -450,8 +465,8 @@ static void exit_meta_cowbtree(struct metadata *md)
 static int flush_meta_cowbtree(struct metadata *md)
 {
 	int r;
-
-	r = __commit_transaction(md);
+	bool destroy_flag = false;
+	r = __commit_transaction(md, destroy_flag);
 	if (r < 0)
 		return r;
 
