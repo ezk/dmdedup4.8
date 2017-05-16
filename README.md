@@ -110,17 +110,24 @@ There are 2 possible modes in which this module can work:
 
 1. Corruption Check: When enabled reports only corruption. This can be enabled
 using following message to device
+
 	dmsetup message dedup 0 corruption_check 1 
+
 To disable this module 
+
 	dmsetup message dedup 0 corruption_check 0
 
 2. Forward Error Correction: In addition to reporting the corruption, this will try to fix the 
 corrpution. This can be enabled using following message to device
+
 	dmsetup message dedup 0 corruption_check 1 fec 1
+
 To disable this module
+
 	dmsetup message dedup 0 corruption_check 1 fec 0
 
 To disable both Corruption Check and Forward Error Correction together 
+
 	dmsetup message dedup 0 corruption_check 0
   
 Target Size
