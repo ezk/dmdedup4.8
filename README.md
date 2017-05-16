@@ -94,6 +94,51 @@ allocated, written, and a corresponding hash is added to the index.
 On read, LBN-PBN mapping allows to quickly locate a required block on the data
 device.  If there were no writes to an LBN before, a zero block is returned.
 
+Garbage Collect Module - dm-dedup provides an offline mechanism to free up disk space. 
+PBNs that are referenced only from the hash index will be freed whenever the garbage 
+collection engine is initiated. This module when called will decrement the reference 
+counts of these PBNs to zero allowing it to be garbage collected. 
+This module can be called using device mapper's message interface. 
+
+Call garbage collect module using:
+
+	dmsetup message dedup 0 garbage_collect
+
+ 
+Corruption Check Module
+-----------------------
+
+In case of unexpected system crash, there is a possiblity of data inconsistency
+between the metadata device and data device. On device reconstruction, we warn the 
+users to run dmdedup corruption check tool if there is a possible inconsistency.
+The corruption check tool also finds data corruptions and reports them.
+
+This module computes the hash of the data being read and fetches its PBN from 
+Hash-PBN mapping. PBN from LBN-PBN entry is compared with the fetched PBN to 
+detect discrepancy. There are 2 possible modes in which this module can work:
+
+1. Corruption Check: When enabled reports only corruption. This can be enabled
+using following message to device
+
+		dmsetup message dedup 0 corruption_check 1 
+
+	To disable this module 
+
+		dmsetup message dedup 0 corruption_check 0
+
+2. Forward Error Correction: In addition to reporting the corruption, this will try to fix the 
+corrpution. This can be enabled using following message to device
+
+		dmsetup message dedup 0 corruption_check 1 fec 1
+
+	To disable this module
+
+		dmsetup message dedup 0 corruption_check 1 fec 0
+
+To disable both Corruption Check and Forward Error Correction together 
+
+	dmsetup message dedup 0 corruption_check 0
+  
 Target Size
 -----------
 
