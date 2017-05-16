@@ -151,7 +151,6 @@ bad_freepage:
 
 bad_putbio:
 	bio_put(clone);
-	//DMINFO("Assigning clone == NULL");
 	clone = NULL;
 
 out:

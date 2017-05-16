@@ -412,27 +412,58 @@ static int handle_write(struct dedup_config *dc, struct bio *bio)
 		return r;
 
 	dc->writes_after_flush++;
-	if ((dc->flushrq && dc->writes_after_flush >= dc->flushrq) ||
-			(bio->bi_opf & (REQ_PREFLUSH | REQ_FUA))) {
+
+	if (bio->bi_opf & (REQ_PREFLUSH | REQ_FUA))
+		goto out;
+
+	if ((dc->flushrq && dc->writes_after_flush >= dc->flushrq)) {
 		r = dc->mdops->flush_meta(dc->bmd);
 		if (r < 0)
 			return r;
 		dc->writes_after_flush = 0;
 	}
 
+out:
 	return 0;
 }
 
 static void process_bio(struct dedup_config *dc, struct bio *bio)
 {
 	int r;
+        struct bio *clone;
+	struct check_io *io;
 
 	if (bio->bi_opf & (REQ_PREFLUSH | REQ_FUA) && !bio_sectors(bio)) {
 		r = dc->mdops->flush_meta(dc->bmd);
 		if (r == 0)
 			dc->writes_after_flush = 0;
 		do_io_remap_device(dc, bio);
-		return;
+
+		DMINFO("Preparing clone for FUA flush");
+
+		/* prepare bio clone to handle disk read
+		 *	clone is created so that we can have our own endio
+		 * 	where we call bio_endio on original bio after
+		 * 	flush metadata are done
+		 */
+		clone = bio_clone_fast(bio, GFP_NOIO, dc->bs);
+		if (!clone) {
+			r = -ENOMEM;
+			goto out;
+		}
+
+		/* store the bio structure in clone's private field
+		 *	used as indirect argument when disk write is finished
+		 */
+		clone->bi_end_io = dedup_flush_endio;
+
+                io = kmalloc(sizeof(struct check_io), GFP_NOIO);
+
+		io->dc = dc;
+		io->base_bio = bio;	
+		clone->bi_private = io;
+
+		bio = clone;
 	}
 
 	switch (bio_data_dir(bio)) {
@@ -443,6 +474,7 @@ static void process_bio(struct dedup_config *dc, struct bio *bio)
 		r = handle_write(dc, bio);
 	}
 
+out:
 	if (r < 0) {
 		bio->bi_error = r;
 		bio_endio(bio);

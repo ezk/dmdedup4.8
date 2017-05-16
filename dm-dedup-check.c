@@ -1,11 +1,8 @@
 /*
- * Copyright (C) 2012-2014 Vasily Tarasov
- * Copyright (C) 2012-2014 Geoff Kuenning
- * Copyright (C) 2012-2014 Sonam Mandal
- * Copyright (C) 2012-2014 Karthikeyani Palanisami
- * Copyright (C) 2012-2014 Philip Shilane
- * Copyright (C) 2012-2014 Sagar Trehan
- * Copyright (C) 2012-2014 Erez Zadok
+ * Copyright (C) 2017-2017 Vasily Tarasov
+ * Copyright (C) 2017-2017 Erez Zadok
+ * Copyright (c) 2017-2017 Vinothumar Raja
+ * Copyright (c) 2017-2017 Nidhi Panpalia
  *
  * This file is released under the GPL.
  */
@@ -178,3 +175,75 @@ void dedup_check_endio(struct bio *clone)
 
 	queue_work(io->dc->workqueue, &(data->worker));
 }
+
+
+static void flush_endio(struct bio *bio, struct check_io *io)
+{
+	int r;
+	struct dedup_config *dc;
+
+	if (bio->bi_error < 0)
+		goto out;
+
+	dc = io->dc;
+
+        BUG_ON(!(bio->bi_opf & (REQ_PREFLUSH | REQ_FUA)));
+
+        r = dc->mdops->flush_meta(dc->bmd);
+        if (r < 0) {
+		bio->bi_error = -EIO;
+                goto out;
+	}
+
+	dc->writes_after_flush = 0;
+	DMINFO("Finishing FUA flush");
+out:
+	kfree(io);
+	bio_endio(bio);
+}
+
+static void issue_flush(struct work_struct *ws)
+{
+        struct check_work *data = container_of(ws, struct check_work, worker);
+        struct check_io *io = (struct check_io *)data->io;
+
+        mempool_free(data, io->dc->check_work_pool);
+
+        flush_endio(io->base_bio, io);
+}
+
+
+void dedup_flush_endio(struct bio *clone)
+{
+	struct check_io *io;
+        struct check_work *data;
+
+        io = clone->bi_private;
+	
+	/* deallocate clone created before disk read */
+	bio_put(clone);
+
+	/*
+	 * initialize a worker for handling metadata flush.
+	 * Directly calling flush_work would panic
+	 */
+	data = mempool_alloc(io->dc->check_work_pool, GFP_NOIO);
+	if (!data) {
+		/*
+		 * XXX: Decide whether to fail or silently pass
+		 *	if unable to do metadata flush
+		 *	and set the corresponding error flags
+		 */
+		bio_endio(io->base_bio);
+		kfree(io);	
+		return;
+	}
+
+	data->io = io;
+
+	INIT_WORK(&(data->worker), issue_flush);
+
+	queue_work(io->dc->workqueue, &(data->worker));
+	
+}
+

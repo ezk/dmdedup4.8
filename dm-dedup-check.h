@@ -34,5 +34,6 @@ struct check_work {
 };
 
 extern void dedup_check_endio(struct bio *clone);
- 
+
+extern void dedup_flush_endio(struct bio *clone); 
 #endif /* DM_DEDUP_CHECK_CORRUPTION_H */
