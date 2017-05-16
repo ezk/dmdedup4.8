@@ -113,7 +113,7 @@ using following message to device
 
 		dmsetup message dedup 0 corruption_check 1 
 
-To disable this module 
+	To disable this module 
 
 		dmsetup message dedup 0 corruption_check 0
 
@@ -122,13 +122,13 @@ corrpution. This can be enabled using following message to device
 
 		dmsetup message dedup 0 corruption_check 1 fec 1
 
-To disable this module
+	To disable this module
 
 		dmsetup message dedup 0 corruption_check 1 fec 0
 
 To disable both Corruption Check and Forward Error Correction together 
 
-		dmsetup message dedup 0 corruption_check 0
+	dmsetup message dedup 0 corruption_check 0
   
 Target Size
 -----------
