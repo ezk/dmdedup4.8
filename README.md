@@ -103,7 +103,7 @@ to the device. Call garbage collect module using:
 	dmsetup message dedup 0 garbage_collect
 
  
-Corruption Check - Whenever a data block is corrupted, dm-dedup can detect it using corruption 
+Corruption Check Module - Whenever a data block is corrupted, dm-dedup can detect it using corruption 
 check module. This module computes the hash of the data being read and fetches it PBN from 
 Hash-PBN mapping. PBN from LBN-PBN entry is compared with the fetched PBN to detect discrepancy. 
 There are 2 possible modes in which this module can work:
