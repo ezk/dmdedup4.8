@@ -94,6 +94,33 @@ allocated, written, and a corresponding hash is added to the index.
 On read, LBN-PBN mapping allows to quickly locate a required block on the data
 device.  If there were no writes to an LBN before, a zero block is returned.
 
+Garbage Collect Module - dm-dedup provides an offline mechanism to free up disk space. 
+PBNs that are referenced only from the hash index,  reference counts are equal to 
+one for them. This module when called will decrement the refernce counts of these PBNs to 
+zero allowing it to be garbage collected. This module can be called via a message 
+to the device. Call garbage collect module using:
+
+	# dmsetup message dedup 0 garbage_collect
+
+ 
+Corruption Check - Whenever a data block is corrupted, it can be detected using corruption 
+check module. This module computes the hash of the data being read and fetches it PBN from 
+Hash-PBN mapping. PBN from LBN-PBN entry is compared with the fetched PBN to detect 
+discrepancy. There are 2 possible modes in which this module can work:
+	- Corruption Check : When enabled reports only corruption. This can be enabled
+	  using following message to device:
+		# dmsetup message dedup 0 corruption_check 1 
+	  and to disable this : 
+  		# dmsetup message dedup 0 corruption_check 0
+
+	- Forward Error Correction : In addition to reporting the corruption, this will try to fix 
+	  the corrpution. This can be enabled using following message to device:
+		# dmsetup message dedup 0 corruption_check 1 fec 1
+	  and to disable this : 
+  		# dmsetup message dedup 0 corruption_check 1 fec 0
+To disable both Corruption Check and Forward Error Correction:
+	# dmsetup message dedup 0 corruption_check 0
+  
 Target Size
 -----------
 
