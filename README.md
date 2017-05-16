@@ -105,21 +105,22 @@ to the device. Call garbage collect module using:
  
 Corruption Check - Whenever a data block is corrupted, dm-dedup can detect it using corruption 
 check module. This module computes the hash of the data being read and fetches it PBN from 
-Hash-PBN mapping. PBN from LBN-PBN entry is compared with the fetched PBN to detect 
-discrepancy. There are 2 possible modes in which this module can work:
-	- Corruption Check : When enabled reports only corruption. This can be enabled
-	  using following message to device:
-		dmsetup message dedup 0 corruption_check 1 
-	  and to disable this : 
-		dmsetup message dedup 0 corruption_check 0
+Hash-PBN mapping. PBN from LBN-PBN entry is compared with the fetched PBN to detect discrepancy. 
+There are 2 possible modes in which this module can work:
 
-	- Forward Error Correction : In addition to reporting the corruption, this will try to fix 
-	  the corrpution. This can be enabled using following message to device:
-		dmsetup message dedup 0 corruption_check 1 fec 1
-	  and to disable this : 
-		dmsetup message dedup 0 corruption_check 1 fec 0
+1. Corruption Check: When enabled reports only corruption. This can be enabled
+using following message to device
+	dmsetup message dedup 0 corruption_check 1 
+To disable this module 
+	dmsetup message dedup 0 corruption_check 0
 
-To disable both Corruption Check and Forward Error Correction:
+2. Forward Error Correction: In addition to reporting the corruption, this will try to fix the 
+corrpution. This can be enabled using following message to device
+	dmsetup message dedup 0 corruption_check 1 fec 1
+To disable this module
+	dmsetup message dedup 0 corruption_check 1 fec 0
+
+To disable both Corruption Check and Forward Error Correction together 
 	dmsetup message dedup 0 corruption_check 0
   
 Target Size
