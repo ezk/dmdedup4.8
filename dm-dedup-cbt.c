@@ -1,12 +1,15 @@
 /*
- * Copyright (C) 2012-2014 Vasily Tarasov
+ * Copyright (C) 2012-2017 Vasily Tarasov
  * Copyright (C) 2012-2014 Geoff Kuenning
  * Copyright (C) 2012-2014 Sonam Mandal
  * Copyright (C) 2012-2014 Karthikeyani Palanisami
  * Copyright (C) 2012-2014 Philip Shilane
  * Copyright (C) 2012-2014 Sagar Trehan
- * Copyright (C) 2012-2014 Erez Zadok
- *
+ * Copyright (C) 2012-2017 Erez Zadok
+ * Copyright (c) 2016-2017 Vinothkumar Raja
+ * Copyright (c) 2017-2017 Nidhi Panpalia
+ * Copyright (c) 2012-2017 Stony Brook University
+ * Copyright (c) 2012-2017 The Research Foundation for SUNY
  * This file is released under the GPL.
  */
 
@@ -60,7 +63,7 @@ struct kvstore_cbt {
 };
 
 enum superblock_flags {
-        DDUP_destruction /* on disk flag to mark clean shutdown */
+        CLEAN_SHUTDOWN /* on disk flag to mark clean shutdown */
 };
 
 #define SPACE_MAP_ROOT_SIZE 128
@@ -143,9 +146,9 @@ static int __commit_transaction(struct metadata *md, bool destroy_flag)
 
 	/* if destroy flag is set, set the bit 1 otherwise 0 */
         if (destroy_flag)
-                disk_super->flags |= (1 << DDUP_destruction);
+                disk_super->flags |= (1 << CLEAN_SHUTDOWN);
         else
-                disk_super->flags &= ~(1 << DDUP_destruction);
+                disk_super->flags &= ~(1 << CLEAN_SHUTDOWN);
 
 	if (md->kvs_linear)
 		disk_super->lbn_pbn_root = cpu_to_le64(md->kvs_linear->root);
@@ -229,7 +232,7 @@ static int write_initial_superblock(struct metadata *md)
 	disk_super->blocknr = cpu_to_le64(dm_block_location(sblock));
 
 	/* set the clean shutdown flag to 0 */
-	disk_super->flags &= ~(1 << DDUP_destruction);
+	disk_super->flags &= ~(1 << CLEAN_SHUTDOWN);
 
 	return dm_tm_commit(md->tm, sblock);
 
@@ -280,28 +283,36 @@ static int verify_superblock(struct dm_block_manager *bm)
 
 	disk_super = dm_block_data(sblock);
 
-	/* if clean shutdown flag is not set return error */
-        if (!(disk_super->flags & (1 << DDUP_destruction)))
-                goto bad_sb;
-
-	if (DM_DEDUP_MAGIC != le64_to_cpu(disk_super->magic))
-		goto bad_sb;
-
-	if (DM_DEDUP_VERSION != disk_super->version)
-		goto bad_sb;
-
-	if (METADATA_BSIZE != le32_to_cpu(disk_super->data_block_size))
-		goto bad_sb;
-
-	if (METADATA_BSIZE != le32_to_cpu(disk_super->metadata_block_size))
-		goto bad_sb;
-
 	csum_le = cpu_to_le32(dm_bm_checksum(&disk_super->flags,
 					     sizeof(struct metadata_superblock) - sizeof(__le32),
 					     SUPERBLOCK_CSUM_XOR));
 
-	if (csum_le != disk_super->csum)
+	if (csum_le != disk_super->csum) {
+		DMERR("Superblock checksum verification failed");
 		goto bad_sb;
+	}
+
+	if (DM_DEDUP_MAGIC != le64_to_cpu(disk_super->magic)) {
+		DMERR("Magic number mismatch");
+		goto bad_sb;
+	}
+
+	if (DM_DEDUP_VERSION != disk_super->version) {
+		DMERR("Version number mismatch");
+		/*
+		 * XXX: handle version upgrade in future if possible
+		 */
+		goto bad_sb;
+	}
+
+	if (METADATA_BSIZE != le32_to_cpu(disk_super->metadata_block_size)) {
+		DMERR("Metadata block size mismatch");		
+		goto bad_sb;
+	}
+
+	/* if clean shutdown flag is not set return error */
+        if (!(disk_super->flags & (1 << CLEAN_SHUTDOWN)))
+		DMWARN("Possible data Inconsistency. Run dmdedup_corruption_check tool"); 
 
 	goto unlock_superblock;
 
