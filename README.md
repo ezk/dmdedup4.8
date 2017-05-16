@@ -100,26 +100,27 @@ one for them. This module when called will decrement the refernce counts of thes
 zero allowing it to be garbage collected. This module can be called via a message 
 to the device. Call garbage collect module using:
 
-	# dmsetup message dedup 0 garbage_collect
+	dmsetup message dedup 0 garbage_collect
 
  
-Corruption Check - Whenever a data block is corrupted, it can be detected using corruption 
+Corruption Check - Whenever a data block is corrupted, dm-dedup can detect it using corruption 
 check module. This module computes the hash of the data being read and fetches it PBN from 
 Hash-PBN mapping. PBN from LBN-PBN entry is compared with the fetched PBN to detect 
 discrepancy. There are 2 possible modes in which this module can work:
 	- Corruption Check : When enabled reports only corruption. This can be enabled
 	  using following message to device:
-		# dmsetup message dedup 0 corruption_check 1 
+		dmsetup message dedup 0 corruption_check 1 
 	  and to disable this : 
-  		# dmsetup message dedup 0 corruption_check 0
+		dmsetup message dedup 0 corruption_check 0
 
 	- Forward Error Correction : In addition to reporting the corruption, this will try to fix 
 	  the corrpution. This can be enabled using following message to device:
-		# dmsetup message dedup 0 corruption_check 1 fec 1
+		dmsetup message dedup 0 corruption_check 1 fec 1
 	  and to disable this : 
-  		# dmsetup message dedup 0 corruption_check 1 fec 0
+		dmsetup message dedup 0 corruption_check 1 fec 0
+
 To disable both Corruption Check and Forward Error Correction:
-	# dmsetup message dedup 0 corruption_check 0
+	dmsetup message dedup 0 corruption_check 0
   
 Target Size
 -----------
