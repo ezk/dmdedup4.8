@@ -95,18 +95,27 @@ On read, LBN-PBN mapping allows to quickly locate a required block on the data
 device.  If there were no writes to an LBN before, a zero block is returned.
 
 Garbage Collect Module - dm-dedup provides an offline mechanism to free up disk space. 
-PBNs that are referenced only from the hash index,  reference counts are equal to 
-one for them. This module when called will decrement the refernce counts of these PBNs to 
-zero allowing it to be garbage collected. This module can be called via a message 
-to the device. Call garbage collect module using:
+PBNs that are referenced only from the hash index will be freed whenever the garbage 
+collection engine is initiated. This module when called will decrement the reference 
+counts of these PBNs to zero allowing it to be garbage collected. 
+This module can be called using device mapper's message interface. 
+
+Call garbage collect module using:
 
 	dmsetup message dedup 0 garbage_collect
 
  
-Corruption Check Module - Whenever a data block is corrupted, dm-dedup can detect it using corruption 
-check module. This module computes the hash of the data being read and fetches it PBN from 
-Hash-PBN mapping. PBN from LBN-PBN entry is compared with the fetched PBN to detect discrepancy. 
-There are 2 possible modes in which this module can work:
+Corruption Check Module
+-----------------------
+
+In case of unexpected system crash, there is a possiblity of data inconsistency
+between the metadata device and data device. On device reconstruction, we warn the 
+users to run dmdedup corruption check tool if there is a possible inconsistency.
+The corruption check tool also finds data corruptions and reports them.
+
+This module computes the hash of the data being read and fetches its PBN from 
+Hash-PBN mapping. PBN from LBN-PBN entry is compared with the fetched PBN to 
+detect discrepancy. There are 2 possible modes in which this module can work:
 
 1. Corruption Check: When enabled reports only corruption. This can be enabled
 using following message to device
